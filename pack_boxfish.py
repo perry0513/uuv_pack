@@ -1,77 +1,88 @@
 import sys
 import time
+import math
 import numpy as np
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-import matplotlib.pyplot as plt
-from z3 import Solver, Real, And, Or, sat, unsat
+from z3 import Solver, Real, Bool, And, Or, sat, unsat, Optimize
 
-import helper as H
+import stl_helper as SH
+from helper import *
+from plotter import Plotter
+from prism import Prism
 
+crush_depth = 1300
 water_density = 1027
 foam_density = 465
 
-def embed():
-    import IPython; IPython.embed()
 
-def z3RatNumRef2Float(x):
-    return x.numerator_as_long() / x.denominator_as_long()
-
-
-'''
-         _____ 
-        /|   /|
-       / |  / |
-      /____/__|
-      |  / |  /
-      | /  | /
-      |____|/
-'''
-
-class Prism:
-    def __init__(self, w, l, h, name, mass, disp_vol):
-        self.w = w
-        self.l = l
-        self.h = h
-        self.name = name
-        self.mass = mass
-        self.disp_vol = disp_vol
+class PVCalculator:
+    def __init__(self, length, diameter, energy_needed):
+        self.diameter = diameter
+        self.length = length
+        diameter *= 1e-3
+        length *= 1e-3
+        g = 9.806
+        youngs_modulus = 3.4e11
+        yield_stress = 2.5e9
+        poissons_ratio = 0.22
+        material_density = 3.95
+        crush_pressure = crush_depth * water_density * g
         
-        self.x_var = Real(f'{name}_x')
-        self.y_var = Real(f'{name}_y')
-        self.z_var = Real(f'{name}_z')
-        self.x = None
-        self.y = None
-        self.z = None
+        self.energy_needed = energy_needed
+        bat_weight_per_unit = 0.213
+        vol_percentage = 0.67
+        bat_vol = 0.0000987
+        power_density_per_unit = 51.2
+        power_density_per_mc = power_density_per_unit * vol_percentage / bat_vol / 1000
+        # print(power_density_per_mc)
+        num_bat_per_mc = vol_percentage / bat_vol
+        num_bat_needed = energy_needed / power_density_per_mc * num_bat_per_mc
+        # print(num_bat_needed)
+        self.bat_mass = bat_weight_per_unit * num_bat_needed
 
-        x = self.x_var
-        y = self.y_var
-        z = self.z_var
+        cylinder_thickness_elastic_failure = (crush_pressure / 2 / youngs_modulus * (1 - poissons_ratio ** 2)) ** (1/3) * diameter
+        cylinder_thickness_yield_failure = 0.5 * (1 - math.sqrt(1 - (2 * crush_pressure / yield_stress))) * diameter
+        cylinder_inner_diameter = diameter - 2 * max(cylinder_thickness_elastic_failure, cylinder_thickness_yield_failure)
+        length = energy_needed / power_density_per_mc / (cylinder_inner_diameter / 2) ** 2 / math.pi
+        self.length = length * 1e3
+        cylinder_material_volume = math.pi * length * ((diameter / 2) ** 2 - (cylinder_inner_diameter / 2) ** 2)
+        cylinder_weight = cylinder_material_volume * material_density * 1000
 
-        p1 = (x, y, z)
-        p2 = (x + w, y, z)
-        p3 = (x, y + l, z)
-        p4 = (x, y, z + h)
-        p5 = (x + w, y + l, z)
-        p6 = (x + w, y, z + h)
-        p7 = (x, y + l, z + h)
-        p8 = (x + w, y + l, z + h)
+        k = crush_pressure / (0.69 * youngs_modulus) * math.sqrt(3 * (1 - poissons_ratio ** 2) / 4)
+        endcap_thickness_elastic_failure = diameter * (k - 2 * math.sqrt(k)) / (k - 4)
+        endcap_thickness_yield_failure = diameter / 2 - (diameter / 2) * (1 - 1.5 * (crush_pressure / yield_stress)) ** (1/3)
+        endcap_inner_diameter = diameter - 2 * max(endcap_thickness_elastic_failure, endcap_thickness_yield_failure)
+        endcap_material_volume = (4/3) * math.pi * ((diameter / 2) ** 3 - (endcap_inner_diameter / 2) ** 3)
+        endcap_weight = endcap_material_volume * material_density * 1000
 
-        self.corners = [p1, p2, p3, p4, p5, p6, p7, p8]
-        self.center = (self.x_var + w/2, self.y_var + l/2, self.z_var + h/2)
+        self.tot_PV_weight = cylinder_weight + endcap_weight
+        self.tot_PV_disp_vol = math.pi * ((diameter / 2) ** 2 * length + 4/3 * (diameter / 2) ** 3)
+        # print(self.tot_PV_disp_vol)
+        self.tot_buoy = self.tot_PV_disp_vol * water_density
+        self.net_buoy = self.tot_buoy - self.tot_PV_weight
 
-    def assign_loc(self, model):
-        self.x = z3RatNumRef2Float(model[self.x_var])
-        self.y = z3RatNumRef2Float(model[self.y_var])
-        self.z = z3RatNumRef2Float(model[self.z_var])
+        self.tot_weight_w_bat = self.tot_PV_weight + self.bat_mass
+        # print(self.bat_mass)
+
+        # min_bat_diameter = 2 * math.sqrt(energy_needed / power_density_per_mc / length / math.pi)
+        # print(min_bat_diameter)
+        # assert cylinder_inner_diameter > min_bat_diameter, 'PV not large enough to pack battery'
+
+    def print_stats(self):
+        print('PV stats:')
+        print(f'  diameter = {PV_stats.diameter} m')
+        print(f'  length   = {PV_stats.length} m')
+        print(f'  mass w/ bat = {PV_stats.tot_weight_w_bat} kg')
+        print(f'  disp volume = {PV_stats.tot_PV_disp_vol} m^3')
 
 
 class Packer:
-    def __init__(self, fairing_params, comps, dyn_fairing):
+    def __init__(self, fairing_params, comps, dyn_fairing, overlap=False):
         self.fairing_params_var = fairing_params 
         self.comps = comps
         self.dyn_fairing = dyn_fairing
+        self.overlap = overlap
         self.s = Solver()
+        self.s = Optimize()
         self.res = None
         self.model = None
         self.fairing_params = None
@@ -81,17 +92,17 @@ class Packer:
         self.fairing_mass = None
 
         # NOTE: for static now only; dyanmic becomes SMTO problem
-        if not dyn_fairing:
+        if not self.dyn_fairing:
             f_w, f_l, f_h, f_hn, f_ht = self.fairing_params_var
             eps = 25
             thickness = 12.7
             fairing_density = 1450
-            H.gen_stl(f_h + eps, f_w + eps, f_l + eps, f_hn + eps, 0 + eps, f_ht + eps, 1)
-            self.fairing_vol = H.parse_volume()
-            self.fairing_disp_vol = H.parse_area() * thickness
+            SH.gen_stl(f_h + eps, f_w + eps, f_l + eps, f_hn + eps, 0 + eps, f_ht + eps, 1)
+            self.fairing_vol = SH.parse_volume()
+            self.fairing_disp_vol = SH.parse_area() * thickness
             self.fairing_mass = self.fairing_disp_vol * fairing_density * 1e-9
             print(f'Fairing vol = {self.fairing_vol * 1e-9} m^3')
-            print(f'Fairing area = {H.parse_area() * 1e-6} m^2')
+            print(f'Fairing area = {SH.parse_area() * 1e-6} m^2')
             print(f'Fairing disp = {self.fairing_disp_vol * 1e-9} m^3')
             print(f'Fairing mass = {self.fairing_mass} kg')
 
@@ -103,40 +114,44 @@ class Packer:
 
         # All corners in boxfish fairing
         for comp in self.comps:
-            for coord in comp.corners:
+            for i, coord in enumerate(comp.corners):
                 x, y, z = coord
-                self.s.add(f_ht * x - f_w / 2 * z <= 0)
-                self.s.add(f_ht * x + f_w / 2 * z >= 0) 
-                self.s.add(f_ht * y - f_l / 2 * z <= 0)
-                self.s.add(f_ht * y + f_l / 2 * z >= 0)
-                self.s.add(x <= f_w / 2)
-                self.s.add(x >= -f_w / 2)
-                self.s.add(y <= f_l / 2)
-                self.s.add(y >= -f_l / 2)
-                self.s.add(f_hn * x + f_w / 2 * z <=  f_w / 2 * (f_h + f_ht + f_hn))
-                self.s.add(f_hn * x - f_w / 2 * z >= -f_w / 2 * (f_h + f_ht + f_hn))
-                self.s.add(f_hn * y + f_l / 2 * z <=  f_l / 2 * (f_h + f_ht + f_hn))
-                self.s.add(f_hn * y - f_l / 2 * z >= -f_l / 2 * (f_h + f_ht + f_hn))
+                in_fairing = Bool(f'{comp.name}_{i}')
+                self.s.add(in_fairing == And(
+                    f_ht * x - f_w / 2 * z <= 0,
+                    f_ht * x + f_w / 2 * z >= 0,
+                    f_ht * y - f_l / 2 * z <= 0,
+                    f_ht * y + f_l / 2 * z >= 0,
+                    x <= f_w / 2,
+                    x >= -f_w / 2,
+                    y <= f_l / 2,
+                    y >= -f_l / 2,
+                    f_hn * x + f_w / 2 * z <=  f_w / 2 * (f_h + f_ht + f_hn),
+                    f_hn * x - f_w / 2 * z >= -f_w / 2 * (f_h + f_ht + f_hn),
+                    f_hn * y + f_l / 2 * z <=  f_l / 2 * (f_h + f_ht + f_hn),
+                    f_hn * y - f_l / 2 * z >= -f_l / 2 * (f_h + f_ht + f_hn)))
+                self.s.add_soft(in_fairing)
+                # self.s.add(in_fairing)
 
 
-        if self.dyn_fairing:
-            self.s.add(f_w > 0)
-            self.s.add(f_l > 0)
-            self.s.add(f_h > 0)
-            self.s.add(f_ht > 0)
-            self.s.add(f_hn > 0)
-            self.s.add(f_w < 10000)
-            self.s.add(f_l < 10000)
-            self.s.add(f_h < 10000)
-            self.s.add(f_ht < 10000)
-            self.s.add(f_hn < 10000)
+        self.s.add(f_w > 0)
+        self.s.add(f_l > 0)
+        self.s.add(f_h > 0)
+        self.s.add(f_ht > 0)
+        self.s.add(f_hn > 0)
+        self.s.add(f_w < 10000)
+        self.s.add(f_l < 10000)
+        self.s.add(f_h < 10000)
+        self.s.add(f_ht < 10000)
+        self.s.add(f_hn < 10000)
 
         # No overlaps
         for i in range(len(self.comps)-1):
             for j in range(i+1, len(self.comps)):
                 corners_i = self.comps[i].corners
                 corners_j = self.comps[j].corners
-                self.s.add(Or(
+                no_overlap = Bool(f'o_{self.comps[i].name}_{self.comps[j].name}')
+                self.s.add(no_overlap == Or(
                     corners_i[0][0] >= corners_j[-1][0],
                     corners_i[0][1] >= corners_j[-1][1],
                     corners_i[0][2] >= corners_j[-1][2],
@@ -144,9 +159,13 @@ class Packer:
                     corners_j[0][1] >= corners_i[-1][1],
                     corners_j[0][2] >= corners_i[-1][2],
                     ))
+                # self.s.add_soft(overlap)
+                self.s.add(no_overlap)
+
+        # self.s.minimize(sum(overlap_vars))
 
         # Neutrally buoyant
-        if not dyn_fairing:
+        if not self.dyn_fairing:
             tot_comp_mass = Real('tot_comp_mass')
             self.s.add(tot_comp_mass == sum([c.mass for c in self.comps]))
             tot_comp_disp_vol = Real('tot_comp_disp_vol')
@@ -159,11 +178,13 @@ class Packer:
             spare_volume = Real('spare_volume')
             self.s.add(spare_volume == self.fairing_vol * 1e-9 - tot_comp_disp_vol)
             max_buoy = Real('max_buoy')
-            self.s.add(max_buoy == spare_volume * (water_density - foam_density) + tot_comp_disp_vol * water_density)
-            self.s.add(max_buoy >= tot_comp_mass + fairing_in_water_weight)
+            self.s.add(max_buoy == spare_volume * water_density + tot_comp_disp_vol * water_density)
+            tot_weight = Real('tot_weight')
+            self.s.add(tot_weight == tot_comp_mass + fairing_in_water_weight + spare_volume * foam_density)
+            self.s.add(max_buoy >= tot_weight)
 
             residual = Real('residual')
-            self.s.add(residual == max_buoy - tot_comp_mass - fairing_in_water_weight)
+            self.s.add(residual == max_buoy - tot_weight)
         
             # print(f'spare vol = {self.fairing_vol * 1e-9 - tot_comp_disp_vol}')
             # print(f'max_buoy = {(self.fairing_vol * 1e-9 - tot_comp_disp_vol) * (water_density - foam_density)}')
@@ -182,6 +203,7 @@ class Packer:
 
         # PMTs are symmetric
         self.s.add(self.comps[2].center[0] == -self.comps[3].center[0])
+        self.s.add(self.comps[2].center[1] == self.comps[3].center[1])
         self.s.add(self.comps[2].center[2] == self.comps[3].center[2])
 
     def add_volume_constraint(self, vol):
@@ -201,7 +223,7 @@ class Packer:
                 model_dict[str(x)] = z3RatNumRef2Float(self.model[x])
             print(model_dict)
 
-            if dyn_fairing:
+            if self.dyn_fairing:
                 self.fairing_params = [z3RatNumRef2Float(self.model[param_var]) for param_var in self.fairing_params_var]
             else:
                 self.fairing_params = self.fairing_params_var
@@ -212,6 +234,15 @@ class Packer:
         assert self.fairing_params is not None and type(self.fairing_params[0]) is float
         f_w, f_l, f_h, f_hn, f_ht = self.fairing_params
         return f_w * f_l * ((f_hn + f_ht) / 3 + f_h)
+
+    def corners_outside_fairing(self):
+        assert self.res == sat
+        count = 0
+        for comp in self.comps:
+            for i, corner in enumerate(comp.corners):
+                in_fairing = str(self.model[Bool(f'{comp.name}_{i}')]) == 'True'
+                if not in_fairing:
+                    count += 1
 
 
     def write_smt2(self):
@@ -249,48 +280,28 @@ class Packer:
             ys.extend([comp.y, comp.y + comp.l])
             zs.extend([comp.z, comp.z + comp.h])
 
+        count = 0
+        for comp in self.comps:
+            for i, corner in enumerate(comp.corners):
+                in_fairing = str(self.model[Bool(f'{comp.name}_{i}')]) == 'True'
+                if not in_fairing:
+                    point = Prism.get_prism_corners(comp.x, comp.y, comp.z, comp.w, comp.l, comp.h)[i]
+                    self.plotter.point(*point)
+                    count += 1
+
         low_mult, high_mult = 0.8, 1.2
         self.plotter.ax.set_xlim3d(low_mult * min(xs), high_mult * max(xs))
         self.plotter.ax.set_ylim3d(low_mult * min(ys), high_mult * max(ys))
         self.plotter.ax.set_zlim3d(low_mult * min(zs), high_mult * max(zs))
         self.plotter.ax.set_box_aspect((np.ptp(xs),np.ptp(ys),np.ptp(zs)))
 
+        if count > 0:
+            print(f'FAIL: {count} points outside fairing')
+        else:
+            print(f'Packed SUCCESSfully!')
+
         self.plotter.show()
 
-class Plotter:
-    def __init__(self):
-        fig = plt.figure()
-        self.ax = fig.add_subplot(projection='3d')
-        self.alpha = 0.2
-
-
-    def rect_prism(self, x, y, z, w, l, h, color='r'):
-        xs = [x, x + w, x    , x    , x + w, x + w, x    , x + w]
-        ys = [y, y    , y + l, y    , y + l, y    , y + l, y + l]
-        zs = [z, z    , z    , z + h, z    , z + h, z + h, z + h]
-        vs = list(zip(xs, ys, zs))
-        sides = [
-                [vs[0], vs[1], vs[4], vs[2]],
-                [vs[0], vs[1], vs[5], vs[3]],
-                [vs[0], vs[2], vs[6], vs[3]],
-                [vs[3], vs[5], vs[7], vs[6]],
-                [vs[1], vs[4], vs[7], vs[5]],
-                [vs[2], vs[4], vs[7], vs[6]]
-                ]
-        self.ax.add_collection3d(Poly3DCollection(sides, facecolors=color, linewidths=1, edgecolors=color, alpha=self.alpha))
-
-    def pyramid(self, rect, peak, color='b'):
-        sides = [
-                [peak, rect[0], rect[1]],
-                [peak, rect[1], rect[2]],
-                [peak, rect[2], rect[3]],
-                [peak, rect[3], rect[0]],
-                [rect[0], rect[1], rect[2], rect[3]]
-                ]
-        self.ax.add_collection3d(Poly3DCollection(sides, facecolors=color, linewidths=1, edgecolors=color, alpha=self.alpha))
-
-    def show(self):
-        plt.show()
 
 
 
@@ -307,7 +318,12 @@ if __name__ == '__main__':
     else:
         f_w, f_l, f_h, f_hn, f_ht = [float(arg) for arg in sys.argv[1:]]
 
-    PV = Prism(1400, 1400, 4700, 'PV', 5990+2175, 6.5167)
+    diameter = min(f_w, f_l) * 6/7
+    PV_stats = PVCalculator(f_h - diameter, diameter, 892 * 1.2)
+    PV_stats.print_stats()
+
+    # PV = Prism(1400, 1400, 4700, 'PV', 5990+2175, 6.5167)
+    PV = Prism(PV_stats.diameter, PV_stats.diameter, PV_stats.length + PV_stats.diameter, 'PV', PV_stats.tot_weight_w_bat, PV_stats.tot_PV_disp_vol)
     OBS = Prism(1000, 1000, 300, 'OBS', 91.3, 0.3)
     PMT1 = Prism(80, 80, 3000, 'PMT1', 75, 0.038)
     PMT2 = Prism(80, 80, 3000, 'PMT2', 75, 0.038)
@@ -315,7 +331,7 @@ if __name__ == '__main__':
     CTD = Prism(20, 160, 50, 'CTD', 60, 0)
 
     comps = [PV, OBS, PMT1, PMT2, ALT, CTD]
-    # comps = [PV, OBS, ALT, CTD]
+    # comps = [PV, OBS, PMT1, PMT2, ]
 
     packer = Packer([f_w, f_l, f_h, f_hn, f_ht], comps, dyn_fairing)
     res = sat
@@ -323,9 +339,19 @@ if __name__ == '__main__':
     # while res == sat:
     print(f'Iteration {iter}:')
     res, runtime = packer.solve()
-    vol = packer.compute_vol()
-    print(f'Check result:   {res}')
-    print(f'Fairing volume: {vol * 1e-9} m^3')
-    print(f'Solve time:     {runtime} s')
-    # packer.add_volume_constraint(vol)
-    packer.plot()
+    if res == sat:
+        vol = packer.compute_vol()
+        print(f'Check result:   {res}')
+        print(f'Fairing volume: {vol * 1e-9} m^3')
+        print(f'Solve time:     {runtime} s')
+        # packer.add_volume_constraint(vol)
+        # packer.write_smt2()
+        packer.plot()
+
+    elif res == unsat:
+        packer = Packer([f_w, f_l, f_h, f_hn, f_ht], comps, dyn_fairing, overlap=True)
+        res, runtime = packer.solve()
+        print(f'Check result:   {res}')
+        # print(f'Fairing volume: {vol * 1e-9} m^3')
+        print(f'Solve time:     {runtime} s')
+        packer.plot()
