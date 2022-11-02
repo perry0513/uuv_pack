@@ -69,10 +69,10 @@ class PVCalculator:
 
     def print_stats(self):
         print('PV stats:')
-        print(f'  diameter = {PV_stats.diameter} m')
-        print(f'  length   = {PV_stats.length} m')
-        print(f'  mass w/ bat = {PV_stats.tot_weight_w_bat} kg')
-        print(f'  disp volume = {PV_stats.tot_PV_disp_vol} m^3')
+        print(f'  diameter = {self.diameter} m')
+        print(f'  length   = {self.length} m')
+        print(f'  mass w/ bat = {self.tot_weight_w_bat} kg')
+        print(f'  disp volume = {self.tot_PV_disp_vol} m^3')
 
 
 class Packer:
@@ -85,11 +85,11 @@ class Packer:
         self.s = Optimize()
         self.res = None
         self.model = None
-        self.fairing_params = None
-        self.plotter = Plotter()
+        self.fairing_params = None if dyn_fairing else fairing_params 
         self.fairing_vol = None
         self.fairing_disp_vol = None
         self.fairing_mass = None
+        print(fairing_params)
 
         # NOTE: for static now only; dyanmic becomes SMTO problem
         if not self.dyn_fairing:
@@ -228,6 +228,18 @@ class Packer:
             else:
                 self.fairing_params = self.fairing_params_var
             print(self.fairing_params)
+
+            self.corners_outside = 0
+            for comp in self.comps:
+                for i, corner in enumerate(comp.corners):
+                    in_fairing = str(self.model[Bool(f'{comp.name}_{i}')]) == 'True'
+                    if not in_fairing:
+                        self.corners_outside += 1
+            if self.corners_outside > 0:
+                print(f'FAIL: {self.corners_outside} points outside fairing')
+            else:
+                print(f'Packed SUCCESSfully!')
+
         return self.res, runtime
 
     def compute_vol(self):
@@ -237,12 +249,7 @@ class Packer:
 
     def corners_outside_fairing(self):
         assert self.res == sat
-        count = 0
-        for comp in self.comps:
-            for i, corner in enumerate(comp.corners):
-                in_fairing = str(self.model[Bool(f'{comp.name}_{i}')]) == 'True'
-                if not in_fairing:
-                    count += 1
+        return self.corners_outside
 
 
     def write_smt2(self):
@@ -251,6 +258,7 @@ class Packer:
 
     def plot(self):
         assert self.res == sat
+        plotter = Plotter()
 
         xs, ys, zs = [], [], []
 
@@ -268,39 +276,33 @@ class Packer:
                     [ f_w/2,  f_l/2, f_ht + f_h],
                     [ f_w/2, -f_l/2, f_ht + f_h]]
 
-        self.plotter.pyramid(lower_rect, [0, 0, 0])
-        self.plotter.pyramid(upper_rect, [0, 0, f_ht + f_h + f_hn])
-        self.plotter.rect_prism(-f_w/2, -f_l/2, f_ht, f_w, f_l, f_h, color='b')
+        plotter.pyramid(lower_rect, [0, 0, 0])
+        plotter.pyramid(upper_rect, [0, 0, f_ht + f_h + f_hn])
+        plotter.rect_prism(-f_w/2, -f_l/2, f_ht, f_w, f_l, f_h, color='b')
         
         # Plot components
         for comp in self.comps:
             comp.assign_loc(self.model)
-            self.plotter.rect_prism(comp.x, comp.y, comp.z, comp.w, comp.l, comp.h)
+            plotter.rect_prism(comp.x, comp.y, comp.z, comp.w, comp.l, comp.h)
             xs.extend([comp.x, comp.x + comp.w])
             ys.extend([comp.y, comp.y + comp.l])
             zs.extend([comp.z, comp.z + comp.h])
 
-        count = 0
         for comp in self.comps:
             for i, corner in enumerate(comp.corners):
                 in_fairing = str(self.model[Bool(f'{comp.name}_{i}')]) == 'True'
                 if not in_fairing:
                     point = Prism.get_prism_corners(comp.x, comp.y, comp.z, comp.w, comp.l, comp.h)[i]
-                    self.plotter.point(*point)
-                    count += 1
+                    plotter.point(*point)
 
         low_mult, high_mult = 0.8, 1.2
-        self.plotter.ax.set_xlim3d(low_mult * min(xs), high_mult * max(xs))
-        self.plotter.ax.set_ylim3d(low_mult * min(ys), high_mult * max(ys))
-        self.plotter.ax.set_zlim3d(low_mult * min(zs), high_mult * max(zs))
-        self.plotter.ax.set_box_aspect((np.ptp(xs),np.ptp(ys),np.ptp(zs)))
+        plotter.ax.set_xlim3d(low_mult * min(xs), high_mult * max(xs))
+        plotter.ax.set_ylim3d(low_mult * min(ys), high_mult * max(ys))
+        plotter.ax.set_zlim3d(low_mult * min(zs), high_mult * max(zs))
+        plotter.ax.set_box_aspect((np.ptp(xs),np.ptp(ys),np.ptp(zs)))
 
-        if count > 0:
-            print(f'FAIL: {count} points outside fairing')
-        else:
-            print(f'Packed SUCCESSfully!')
 
-        self.plotter.show()
+        plotter.show()
 
 
 
