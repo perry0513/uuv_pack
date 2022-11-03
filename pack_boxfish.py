@@ -30,7 +30,7 @@ class PVCalculator:
         
         self.energy_needed = energy_needed
         bat_weight_per_unit = 0.213
-        vol_percentage = 0.67
+        vol_percentage = 0.86
         bat_vol = 0.0000987
         power_density_per_unit = 51.2
         power_density_per_mc = power_density_per_unit * vol_percentage / bat_vol / 1000

@@ -14,9 +14,13 @@ def get_PV(f_params, energy_needed):
     f_w, f_l, f_h, _, _= f_params
     diameter = min(f_w, f_l) * 6/7
     PV_stats = PVCalculator(f_h - diameter, diameter, energy_needed)
-    PV_stats.print_stats()
+    # PV_stats.print_stats()
     PV = Prism(PV_stats.diameter, PV_stats.diameter, PV_stats.length + PV_stats.diameter, 'PV', PV_stats.tot_weight_w_bat, PV_stats.tot_PV_disp_vol)
     return PV
+
+def get_ratio_rel2width(params):
+    w, l, h, hn, ht = params
+    return [l/w, h/w, hn/w, ht/w]
 
 def analyze(record):
     print('*************************')
@@ -30,7 +34,7 @@ def analyze(record):
         print(f'> Increase smallest dimension ({min(init_f_params)})')
     else:
         last.plot()
-    pass
+    sys.exit(1)
 
 if __name__ == '__main__':
     dyn_fairing = len(sys.argv) != 6
@@ -72,19 +76,19 @@ if __name__ == '__main__':
             print(f'Fairing parameter exceeds ub ({param_ub}), enter anaylsis...')
             analyze(record)
             break
-        packer = Packer(f_params.tolist(), comps, dyn_fairing)
+        packer = Packer(f_params.tolist(), comps)
         res, runtime = packer.solve()
+        vol = packer.compute_vol()
+        print(f'Check result:   {res}')
+        print(f'Fairing volume: {vol * 1e-9} m^3')
+        print(f'Solve time:     {runtime} s')
+        print()
         if res == unsat:
             f_params *= upscale
             record.append(packer)
             continue
         corners_outside_fairing = packer.corners_outside_fairing()
-        vol = packer.compute_vol()
         record.append(packer)
-        print()
-        print(f'Check result:   {res}')
-        print(f'Fairing volume: {vol * 1e-9} m^3')
-        print(f'Solve time:     {runtime} s')
         if corners_outside_fairing > 0:
             f_params *= upscale
         else: break
@@ -93,22 +97,82 @@ if __name__ == '__main__':
     print('       Downscaling       ')
     print('*************************')
     while True:
-        packer = Packer(f_params.tolist(), comps, dyn_fairing)
+        comps[-1] = get_PV(f_params.tolist(), 892 * 1.2)
+        packer = Packer(f_params.tolist(), comps)
         res, runtime = packer.solve()
-        if res == unsat:
-            break
-        corners_outside_fairing = packer.corners_outside_fairing()
         vol = packer.compute_vol()
-        print()
         print(f'Check result:   {res}')
         print(f'Fairing volume: {vol * 1e-9} m^3')
         print(f'Solve time:     {runtime} s')
+        print()
+        if res == unsat:
+            break
+        corners_outside_fairing = packer.corners_outside_fairing()
         if packer.corners_outside_fairing() == 0:
             record.append(packer)
             f_params *= downscale
         else: break
-    f_params = record[-1].fairing_params
-    record[-1].plot()
+    packer = record[-1]
+    packer.plot()
 
+    ratio_ub = 1.05
+    ratio_lb = 0.95
+
+    print('*************************')
+    print('       Refinement        ')
+    print('*************************')
+    f_params = packer.fairing_params
+    f_params_lb = np.array(f_params) * downscale
+    vol = packer.compute_vol()
+    rl, rh, rhn, rht = get_ratio_rel2width(f_params)
+    s = Solver()
+    # w = packer.fairing_params[0]
+    w, l, h, hn, ht = Real('w'), Real('l'), Real('h'), Real('hn'), Real('ht')
+    s.add(And(
+        w * rl * ratio_lb <= l,
+        w * rl * ratio_ub >= l))
+    s.add(And(
+        w * rh * ratio_lb <= h,
+        w * rh * ratio_ub >= h))
+    s.add(And(
+        w * rhn * ratio_lb <= hn,
+        w * rhn * ratio_ub >= hn))
+    s.add(And(
+        w * rht * ratio_lb <= ht,
+        w * rht * ratio_ub >= ht))
+    s.add(w  > f_params_lb[0])
+    s.add(l  > f_params_lb[1])
+    s.add(h  > f_params_lb[2])
+    s.add(hn > f_params_lb[3])
+    s.add(ht > f_params_lb[4])
+    pack_success = True
+    while True:
+        if pack_success:
+            s.add(w * l * (h + (hn + ht) / 3) <= vol * 0.95)
         
+        if s.check() == sat:
+            model = [z3RatNumRef2Float(s.model()[x]) for x in [w, l, h, hn, ht]]
+            print(f'model: {model}')
+            # comps[-1] = get_PV(model, 892 * 1.2)
+            packer = Packer(model, comps)
+            res, runtime = packer.solve()
+            vol = packer.compute_vol()
+            print(f'Check result:   {res}')
+            print(f'Fairing volume: {vol * 1e-9} m^3')
+            print(f'Solve time:     {runtime} s')
+            print()
+            if res == sat:
+                pack_success = packer.corners_outside_fairing() == 0
+                if pack_success:
+                    record.append(packer)
+                else:
+                    s.add(w > model[0] * 1.02)
+                    s.add(l > model[1] * 1.02)
+                    s.add(h > model[2] * 1.02)
+                    s.add(hn > model[3] * 1.02)
+                    s.add(ht > model[4] * 1.02)
+            else: break
+        else: break
 
+    print('End')
+    record[-1].plot()
