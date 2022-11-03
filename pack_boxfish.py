@@ -2,6 +2,7 @@ import sys
 import time
 import math
 import numpy as np
+from copy import deepcopy
 from z3 import Solver, Real, Bool, And, Or, sat, unsat, Optimize
 
 import stl_helper as SH
@@ -76,9 +77,9 @@ class PVCalculator:
 
 
 class Packer:
-    def __init__(self, fairing_params, comps, dyn_fairing, overlap=False):
+    def __init__(self, fairing_params, comps, dyn_fairing=False, overlap=False):
         self.fairing_params_var = fairing_params 
-        self.comps = comps
+        self.comps = deepcopy(comps)
         self.dyn_fairing = dyn_fairing
         self.overlap = overlap
         self.s = Solver()
@@ -202,9 +203,11 @@ class Packer:
             self.s.add(cm_z == f_ht + f_h / 2)
 
         # PMTs are symmetric
-        self.s.add(self.comps[2].center[0] == -self.comps[3].center[0])
-        self.s.add(self.comps[2].center[1] == self.comps[3].center[1])
-        self.s.add(self.comps[2].center[2] == self.comps[3].center[2])
+        PMT1 = next(c for c in self.comps if c.name == 'PMT1')
+        PMT2 = next(c for c in self.comps if c.name == 'PMT2')
+        self.s.add(PMT1.center[0] == -PMT2.center[0])
+        self.s.add(PMT1.center[1] ==  PMT2.center[1])
+        self.s.add(PMT1.center[2] ==  PMT2.center[2])
 
     def add_volume_constraint(self, vol):
         assert self.dyn_fairing
@@ -215,13 +218,13 @@ class Packer:
         start = time.time()
         self.res = self.s.check()
         runtime = time.time() - start
-        print(self.res)
+        # print(self.res)
         if self.res == sat:
             self.model = self.s.model()
             model_dict = {}
             for x in self.model:
                 model_dict[str(x)] = z3RatNumRef2Float(self.model[x])
-            print(model_dict)
+            # print(model_dict)
 
             if self.dyn_fairing:
                 self.fairing_params = [z3RatNumRef2Float(self.model[param_var]) for param_var in self.fairing_params_var]
