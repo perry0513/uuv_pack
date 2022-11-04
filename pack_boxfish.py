@@ -98,7 +98,8 @@ class Packer:
             eps = 25
             thickness = 12.7
             fairing_density = 1450
-            SH.gen_stl(f_h + eps, f_w + eps, f_l + eps, f_hn + eps, 0 + eps, f_ht + eps, 1)
+            # self.gen_stl(f_h + eps, f_w + eps, f_l + eps, f_hn + eps, 0 + eps, f_ht + eps)
+            self.gen_stl(f_w + eps, f_l + eps, f_h + eps, f_hn + eps, f_ht + eps)
             self.fairing_vol = SH.parse_volume()
             self.fairing_disp_vol = SH.parse_area() * thickness
             self.fairing_mass = self.fairing_disp_vol * fairing_density * 1e-9
@@ -108,6 +109,9 @@ class Packer:
             print(f'Fairing mass = {self.fairing_mass} kg')
 
         self.encode()
+
+    def gen_stl(self, w, l, h, hn, ht, r=0, er=1):
+        SH.gen_stl(h, w, l, hn, r, ht, er)
 
 
     def encode(self):
